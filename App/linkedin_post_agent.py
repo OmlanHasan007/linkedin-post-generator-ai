@@ -1,9 +1,14 @@
+"""
+linkedin_post_agent.py
+----------------------
+Standalone CLI agent for generating LinkedIn posts.
+Can be used independently from the FastAPI backend for testing or scripting.
+"""
+
 import os
-import traceback
+import asyncio
 from typing import List
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -12,44 +17,25 @@ from langchain.schema.output_parser import StrOutputParser
 from langchain.schema.runnable import RunnablePassthrough
 
 # ---------------------------------------------------------------------------
-# Environment & configuration
+# Environment
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-BASE_URL = os.getenv("BASE_URL", "https://models.github.ai/inference")
-API_KEY = os.getenv("API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+BASE_URL = os.getenv("BASE_URL")
+API_KEY = os.getenv("API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME")
 
+if not BASE_URL or not MODEL_NAME:
+    raise ValueError("Please set BASE_URL and MODEL_NAME in your .env file.")
 if not API_KEY:
-    raise ValueError("❌ API_KEY is not set. Add it to your .env file.")
+    raise ValueError("Please set API_KEY in your .env file.")
 
 # ---------------------------------------------------------------------------
-# FastAPI app
+# Pydantic model
 # ---------------------------------------------------------------------------
-app = FastAPI(
-    title="LinkedIn Post Generator API",
-    description="Generate professional LinkedIn posts using LangChain and an OpenAI-compatible LLM.",
-    version="1.0.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
-class PostRequest(BaseModel):
-    topic: str
-    language: str = "English"
-    tone: str = "Professional"
-
-
 class LinkedInPost(BaseModel):
+    """Structured representation of a LinkedIn post."""
+
     title: str = Field(description="Catchy headline for the post")
     content: str = Field(description="Main post body (2–4 paragraphs)")
     hashtags: List[str] = Field(description="Relevant hashtags (without the # symbol)")
@@ -66,7 +52,7 @@ class LinkedInPost(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# LangChain setup (LCEL style)
+# LangChain setup (LCEL)
 # ---------------------------------------------------------------------------
 llm = ChatOpenAI(
     base_url=BASE_URL,
@@ -103,7 +89,7 @@ prompt = PromptTemplate(
     template=_PROMPT_TEMPLATE,
 )
 
-post_chain = (
+_post_chain = (
     RunnablePassthrough.assign(
         topic=lambda x: x["topic"],
         language=lambda x: x["language"],
@@ -116,16 +102,39 @@ post_chain = (
 
 
 # ---------------------------------------------------------------------------
-# Agent
+# Agent class
 # ---------------------------------------------------------------------------
 class LinkedInPostAgent:
-    """Wraps the LangChain chain and handles parsing / fallback."""
+    """AI agent that generates structured LinkedIn posts using LangChain."""
 
-    async def generate_post(self, topic: str, language: str = "English", tone: str = "Professional") -> LinkedInPost:
-        raw_text: str = await post_chain.ainvoke({"topic": topic, "language": language, "tone": tone})
-        return self._parse(raw_text, topic)
+    async def generate_post(
+        self,
+        topic: str,
+        language: str = "English",
+        tone: str = "Professional",
+    ) -> LinkedInPost:
+        """
+        Generate a LinkedIn post.
+
+        Args:
+            topic:    Subject of the post (e.g. "AI in Healthcare").
+            language: Output language (e.g. "English", "German").
+            tone:     Writing tone (e.g. "Professional", "Inspirational").
+
+        Returns:
+            A structured LinkedInPost object.
+        """
+        try:
+            raw_text: str = await _post_chain.ainvoke(
+                {"topic": topic, "language": language, "tone": tone}
+            )
+            return self._parse(raw_text, topic)
+        except Exception as e:
+            print(f"⚠️  Generation error: {e}")
+            return self._fallback(topic)
 
     def _parse(self, text: str, topic: str) -> LinkedInPost:
+        """Parse LLM output into a LinkedInPost."""
         lines = text.strip().splitlines()
         title = ""
         hashtags: List[str] = []
@@ -155,44 +164,77 @@ class LinkedInPostAgent:
             elif parsing_content and stripped:
                 content_lines.append(stripped)
 
-        content = "\n\n".join(content_lines)
-
         return LinkedInPost(
             title=title or f"Professional Insights on {topic}",
-            content=content or f"Here are my thoughts on {topic} and its impact on our industry.",
+            content="\n\n".join(content_lines) or f"Here are my thoughts on {topic}.",
             hashtags=hashtags or ["professional", "insights", "networking"],
-            call_to_action=call_to_action or "What are your thoughts? Share in the comments!",
+            call_to_action=call_to_action or "What are your thoughts? Let's discuss below!",
+        )
+
+    def _fallback(self, topic: str) -> LinkedInPost:
+        """Return a safe fallback post when generation fails."""
+        return LinkedInPost(
+            title=f"Professional Insights on {topic}",
+            content=(
+                f"As professionals, we are constantly navigating the evolving landscape of {topic}. "
+                "This topic presents both challenges and opportunities that deserve our attention. "
+                "I'd love to hear your perspectives."
+            ),
+            hashtags=["professional", "insights", "networking", "industry"],
+            call_to_action="What's your take? Let's discuss in the comments below!",
         )
 
 
-agent = LinkedInPostAgent()
-
-
 # ---------------------------------------------------------------------------
-# Routes
+# CLI entry point
 # ---------------------------------------------------------------------------
-@app.get("/", tags=["Health"])
-async def root():
-    """Health check endpoint."""
-    return {"status": "ok", "message": "LinkedIn Post Generator API is running."}
+async def main() -> None:
+    agent = LinkedInPostAgent()
+
+    demo_requests = [
+        {"topic": "AI in Healthcare", "language": "English", "tone": "Professional"},
+        {"topic": "Remote Work Productivity", "language": "English", "tone": "Inspirational"},
+    ]
+
+    print("🚀 LinkedIn Post Generator — CLI Demo")
+    print("=" * 55)
+
+    for i, req in enumerate(demo_requests, 1):
+        print(f"\n📝 Demo {i}: '{req['topic']}' | {req['language']} | {req['tone']}")
+        print("-" * 45)
+        post = await agent.generate_post(**req)
+        print(post.format_post())
+        print("=" * 55)
+
+    # Interactive loop
+    print("\n🎯 Interactive Mode  (type 'quit' to exit)")
+    print("Format: Topic, Language, Tone   e.g. → Machine Learning, English, Casual\n")
+
+    while True:
+        try:
+            user_input = input("> ").strip()
+            if user_input.lower() in ("quit", "exit", "q"):
+                print("👋 Goodbye!")
+                break
+            if not user_input:
+                continue
+
+            parts = [p.strip() for p in user_input.split(",")]
+            topic = parts[0]
+            language = parts[1] if len(parts) > 1 else "English"
+            tone = parts[2] if len(parts) > 2 else "Professional"
+
+            print(f"\n🔄 Generating post about '{topic}' in {language} ({tone} tone)…\n")
+            post = await agent.generate_post(topic, language, tone)
+            print(post.format_post())
+            print("=" * 55)
+
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
 
 
-@app.post("/generate", response_model=LinkedInPost, tags=["Generator"])
-async def generate_post(request: PostRequest):
-    """Generate a structured LinkedIn post and return it as JSON."""
-    try:
-        return await agent.generate_post(request.topic, request.language, request.tone)
-    except Exception as e:
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
-
-
-@app.post("/generate_formatted", tags=["Generator"])
-async def generate_formatted(request: PostRequest):
-    """Generate a LinkedIn post and return a ready-to-paste formatted string."""
-    try:
-        post = await agent.generate_post(request.topic, request.language, request.tone)
-        return {"formatted_post": post.format_post()}
-    except Exception as e:
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+if __name__ == "__main__":
+    asyncio.run(main())
